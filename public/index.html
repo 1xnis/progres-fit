@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ro">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Progres Fit – Gestiune sală</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="login" hidden>
+    <form id="form-login" class="card">
+      <h1>Progres <span>Fit</span></h1>
+      <p>Gestiunea sălii de fitness</p>
+      <label>Email <input name="email" type="email" autocomplete="username" required></label>
+      <label>Parolă <input name="parola" type="password" autocomplete="current-password" required></label>
+      <p class="eroare" role="alert"></p>
+      <button>Autentificare</button>
+    </form>
+  </main>
+
+  <div id="app" hidden>
+    <header>
+      <strong>Progres <span>Fit</span></strong>
+      <nav id="nav" aria-label="Secțiuni"></nav>
+      <span id="cine"></span>
+      <button id="logout" class="secundar">Ieșire</button>
+    </header>
+    <main id="continut"></main>
+  </div>
+
+  <dialog id="dialog">
+    <form id="form-ent" method="dialog">
+      <h2></h2>
+      <div id="campuri"></div>
+      <p class="eroare" role="alert"></p>
+      <menu>
+        <button type="button" class="secundar" id="renunta">Renunță</button>
+        <button value="ok">Salvează</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
