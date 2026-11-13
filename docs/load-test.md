@@ -5,8 +5,8 @@ toate cererile autentificate (fiecare cerere face și verificarea sesiunii în b
 
 | Scenariu | Cerere | Cereri/s (medie) | p50 (ms) | p97.5 (ms) | p99 (ms) | max (ms) | Erori |
 |---|---|---|---|---|---|---|---|
-| Listă paginată | `GET /api/membri?limit=50` | 489 | 97 | 145 | 185 | 194 | 0 |
-| Căutare după nume (ILIKE) | `GET /api/membri?q=popescu&limit=50` | 167 | 292 | 384 | 388 | 430 | 0 |
-| Filtru pe coloană indexată | `GET /api/abonamente?membru_id=1234` | 584 | 79 | 131 | 171 | 390 | 0 |
-| Listă cu 2 etichete FK | `GET /api/abonamente?limit=50` | 321 | 150 | 199 | 209 | 269 | 0 |
-| Scriere (UPDATE) | `PUT /api/membri/1` | 902 | 51 | 78 | 90 | 300 | 0 |
+| Listă paginată | `GET /api/membri?limit=50` | 86 | 551 | 795 | 874 | 906 | 0 |
+| Căutare după nume (ILIKE) | `GET /api/membri?q=popescu&limit=50` | 81 | 588 | 785 | 851 | 902 | 0 |
+| Filtru pe coloană indexată | `GET /api/abonamente?membru_id=1234` | 87 | 552 | 755 | 840 | 884 | 0 |
+| Listă cu 2 etichete FK | `GET /api/abonamente?limit=50` | 85 | 554 | 791 | 852 | 905 | 0 |
+| Scriere (UPDATE) | `PUT /api/membri/1` | 86 | 555 | 704 | 795 | 879 | 0 |
