@@ -92,3 +92,27 @@ ALTER TABLE abonamente       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE clase            ENABLE ROW LEVEL SECURITY;
 ALTER TABLE programari       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE plati            ENABLE ROW LEVEL SECURITY;
+
+-- nu lasa mai multe programari decat locuri are clasa
+CREATE OR REPLACE FUNCTION verifica_capacitate() RETURNS trigger AS $$
+DECLARE
+  locuri int;
+  ocupate int;
+BEGIN
+  IF NEW.status = 'anulat' THEN
+    RETURN NEW;
+  END IF;
+  -- blochez randul clasei, altfel doua programari facute in acelasi timp ar lua amandoua ultimul loc
+  SELECT capacitate INTO locuri FROM clase WHERE id = NEW.clasa_id FOR UPDATE;
+  SELECT count(*) INTO ocupate FROM programari
+    WHERE clasa_id = NEW.clasa_id AND status <> 'anulat' AND id <> NEW.id;
+  IF ocupate >= locuri THEN
+    RAISE EXCEPTION 'Clasa este plină, toate cele % locuri sunt ocupate', locuri;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE TRIGGER trg_capacitate
+  BEFORE INSERT OR UPDATE ON programari
+  FOR EACH ROW EXECUTE FUNCTION verifica_capacitate();

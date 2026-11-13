@@ -173,12 +173,26 @@ app.disable('x-powered-by');
 app.use(express.json({ limit: '50kb' }));
 app.use(express.static(fileURLToPath(new URL('public', import.meta.url))));
 
+// dupa 10 parole gresite la rand pe acelasi cont (de la acelasi IP) blochez 15 minute
+// e tinut in memorie, deci se reseteaza la repornirea serverului
+const greseli = new Map();
+const MAX_GRESELI = 10, BLOCAJ_MS = 15 * 60e3;
+
 app.post('/api/login', async (req, res) => {
   const email = String(req.body?.email ?? '').trim().toLowerCase();
   const parola = String(req.body?.parola ?? '');
+  const cheie = req.ip + ' ' + email;
+  const g = greseli.get(cheie);
+  if (g && g.n >= MAX_GRESELI && Date.now() - g.ultima < BLOCAJ_MS) {
+    throw eroare(429, 'Prea multe încercări greșite. Încearcă din nou peste 15 minute.');
+  }
   const u = (await query('SELECT id, parola_hash FROM utilizatori WHERE email = $1', [email])).rows[0];
   // același mesaj pentru email inexistent și parolă greșită
-  if (!u || !(await verificaParola(parola, u.parola_hash))) throw eroare(401, 'Email sau parolă incorectă');
+  if (!u || !(await verificaParola(parola, u.parola_hash))) {
+    greseli.set(cheie, { n: (g && Date.now() - g.ultima < BLOCAJ_MS ? g.n : 0) + 1, ultima: Date.now() });
+    throw eroare(401, 'Email sau parolă incorectă');
+  }
+  greseli.delete(cheie);
   const token = randomBytes(32).toString('hex');
   await query('DELETE FROM sesiuni WHERE expira_la < now()');
   await query(`INSERT INTO sesiuni (token_hash, utilizator_id, expira_la) VALUES ($1, $2, now() + $3 * interval '1 hour')`,
@@ -205,14 +219,36 @@ app.post('/api/logout', async (req, res) => {
 });
 
 // Tot ce are nevoie interfața: cine sunt și ce am voie să văd/modific.
-app.get('/api/me', (req, res) => {
+app.get('/api/me', async (req, res) => {
   const { rol } = req.u;
+  const antrenor = rol === 'antrenor' &&
+    (await query('SELECT id FROM antrenori WHERE utilizator_id = $1', [req.u.id])).rows[0];
   res.json({
     utilizator: req.u,
+    antrenor_id: antrenor ? antrenor.id : null,
     entitati: Object.fromEntries(Object.entries(entitati).filter(([, e]) => e.citire.includes(rol)).map(([k, e]) =>
       [k, { titlu: e.titlu, coloane: e.coloane, scriere: e.scriere.includes(rol), faraCreare: !!e.faraCreare }])),
     rapoarte: Object.fromEntries(Object.entries(rapoarte).filter(([, r]) => r.roluri.includes(rol)).map(([k, r]) => [k, r.titlu])),
   });
+});
+
+// cifrele si clasele de pe pagina "Azi"; banii si abonamentele nu ajung la antrenor
+app.get('/api/azi', async (req, res) => {
+  const azi = `(now() AT TIME ZONE 'Europe/Bucharest')::date`;
+  const cifre = (await query(`SELECT
+      (SELECT count(*)::int FROM membri) AS membri,
+      (SELECT count(*)::int FROM abonamente WHERE status = 'activ' AND data_sfarsit >= current_date) AS abonamente_active,
+      (SELECT count(*)::int FROM abonamente WHERE status = 'activ' AND data_sfarsit BETWEEN current_date AND current_date + 7) AS expira,
+      (SELECT coalesce(sum(suma), 0) FROM plati WHERE platit_la >= date_trunc('month', now())) AS incasari_luna`)).rows[0];
+  if (!RECEPTIE.includes(req.u.rol)) {
+    delete cifre.abonamente_active; delete cifre.expira; delete cifre.incasari_luna;
+  }
+  const clase = (await query(`SELECT c.id, c.denumire, c.incepe_la, c.capacitate, c.antrenor_id, ${persoana('an')} AS antrenor,
+        count(p.id) FILTER (WHERE p.status <> 'anulat')::int AS rezervari
+      FROM clase c JOIN antrenori an ON an.id = c.antrenor_id LEFT JOIN programari p ON p.clasa_id = c.id
+      WHERE (c.incepe_la AT TIME ZONE 'Europe/Bucharest')::date = ${azi}
+      GROUP BY c.id, an.id ORDER BY c.incepe_la`)).rows;
+  res.json({ cifre, clase });
 });
 
 app.get('/api/rapoarte/:nume', async (req, res) => {
@@ -238,11 +274,13 @@ function idDin(req) {
 }
 
 // Păstrează din body doar coloanele declarate; restul validării o fac constrângerile din BD.
-async function valori(e, body) {
+async function valori(e, body, laCreare) {
   const v = {};
   for (const [c, def] of Object.entries(e.coloane)) {
     if (!body || !Object.hasOwn(body, c)) continue;
     let x = body[c] === '' ? null : body[c];
+    // la creare sar peste campurile goale, ca sa se puna DEFAULT-ul din tabel
+    if (x == null && laCreare) continue;
     if (def.tip === 'email' && typeof x === 'string') x = x.trim().toLowerCase();
     if (c === 'parola') {
       if (x == null) continue;
@@ -252,6 +290,14 @@ async function valori(e, body) {
   }
   if (!Object.keys(v).length) throw eroare(400, 'Niciun câmp valid în cerere');
   return v;
+}
+
+// antrenorul umbla doar la clasele lui; pentru restul intoarce null si nu se schimba nimic
+async function antrenorulMeu(req) {
+  if (req.params.ent !== 'clase' || req.u.rol !== 'antrenor') return null;
+  const a = (await query('SELECT id FROM antrenori WHERE utilizator_id = $1', [req.u.id])).rows[0];
+  if (!a) throw eroare(403, 'Contul tău nu e legat de niciun antrenor');
+  return a.id;
 }
 
 app.get('/api/:ent', async (req, res) => {
@@ -276,7 +322,9 @@ app.get('/api/:ent', async (req, res) => {
 app.post('/api/:ent', async (req, res) => {
   const e = entitate(req, 'scriere');
   if (e.faraCreare) throw eroare(405, 'Sesiunile se creează doar prin autentificare');
-  const v = await valori(e, req.body);
+  const v = await valori(e, req.body, true);
+  const meu = await antrenorulMeu(req);
+  if (meu) v.antrenor_id = meu;
   const k = Object.keys(v);
   const { rows } = await query(
     `INSERT INTO ${req.params.ent} (${k.join(', ')}) VALUES (${k.map((_, i) => '$' + (i + 1)).join(', ')}) RETURNING id`,
@@ -288,11 +336,14 @@ app.put('/api/:ent/:id', async (req, res) => {
   const e = entitate(req, 'scriere');
   const id = idDin(req);
   const v = await valori(e, req.body);
+  const meu = await antrenorulMeu(req);
+  if (meu) v.antrenor_id = meu; // sa nu-si poata muta clasa pe alt antrenor
   const k = Object.keys(v);
   const { rows } = await query(
-    `UPDATE ${req.params.ent} SET ${k.map((c, i) => `${c} = $${i + 1}`).join(', ')} WHERE id = $${k.length + 1} RETURNING id`,
+    `UPDATE ${req.params.ent} SET ${k.map((c, i) => `${c} = $${i + 1}`).join(', ')}
+     WHERE id = $${k.length + 1} ${meu ? 'AND antrenor_id = ' + meu : ''} RETURNING id`,
     [...Object.values(v), id]);
-  if (!rows.length) throw eroare(404, 'Înregistrare inexistentă');
+  if (!rows.length) throw meu ? eroare(403, 'Poți modifica doar clasele tale') : eroare(404, 'Înregistrare inexistentă');
   // o parolă schimbată invalidează sesiunile vechi ale acelui utilizator
   if (v.parola_hash) await query('DELETE FROM sesiuni WHERE utilizator_id = $1 AND id <> $2', [id, req.u.sesiune_id]);
   res.json(rows[0]);
@@ -302,8 +353,10 @@ app.delete('/api/:ent/:id', async (req, res) => {
   entitate(req, 'scriere');
   const id = idDin(req);
   if (req.params.ent === 'utilizatori' && id === req.u.id) throw eroare(400, 'Nu îți poți șterge propriul cont');
-  const { rows } = await query(`DELETE FROM ${req.params.ent} WHERE id = $1 RETURNING id`, [id]);
-  if (!rows.length) throw eroare(404, 'Înregistrare inexistentă');
+  const meu = await antrenorulMeu(req);
+  const { rows } = await query(
+    `DELETE FROM ${req.params.ent} WHERE id = $1 ${meu ? 'AND antrenor_id = ' + meu : ''} RETURNING id`, [id]);
+  if (!rows.length) throw meu ? eroare(403, 'Poți șterge doar clasele tale') : eroare(404, 'Înregistrare inexistentă');
   res.status(204).end();
 });
 
@@ -318,6 +371,8 @@ const eroriPg = {
   23502: [400, 'Lipsește un câmp obligatoriu'],
 };
 app.use((err, req, res, next) => {
+  // P0001 = RAISE EXCEPTION din trigger (clasa plina), mesajul e deja scris pentru utilizator
+  if (err.code === 'P0001') return res.status(409).json({ eroare: err.message });
   const [status, mesaj] = eroriPg[err.code] ?? (String(err.code).startsWith('22') ? [400, 'Valoare cu format invalid'] : []);
   if (status) return res.status(status).json({ eroare: `${mesaj} (${err.constraint ?? err.column ?? err.code})` });
   if (err.status) return res.status(err.status).json({ eroare: err.status < 500 && err.type ? 'Cerere invalidă' : err.message });

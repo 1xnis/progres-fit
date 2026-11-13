@@ -4,27 +4,32 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Progres Fit – Gestiune sală</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <main id="login" hidden>
-    <form id="form-login" class="card">
-      <h1>Progres <span>Fit</span></h1>
-      <p>Gestiunea sălii de fitness</p>
+    <form id="form-login">
+      <p class="marca">Progres Fit</p>
+      <h1>Intră în cont</h1>
       <label>Email <input name="email" type="email" autocomplete="username" required></label>
       <label>Parolă <input name="parola" type="password" autocomplete="current-password" required></label>
       <p class="eroare" role="alert"></p>
-      <button>Autentificare</button>
+      <button>Intră în cont</button>
     </form>
   </main>
 
   <div id="app" hidden>
-    <header>
-      <strong>Progres <span>Fit</span></strong>
+    <aside id="meniu">
+      <p class="marca">Progres Fit</p>
       <nav id="nav" aria-label="Secțiuni"></nav>
-      <span id="cine"></span>
-      <button id="logout" class="secundar">Ieșire</button>
-    </header>
+      <div id="cont">
+        <span id="cine"></span>
+        <button id="logout" class="secundar">Ieși din cont</button>
+      </div>
+    </aside>
     <main id="continut"></main>
   </div>
 
@@ -39,6 +44,8 @@
       </menu>
     </form>
   </dialog>
+
+  <div id="mesaj" role="status" aria-live="polite" hidden></div>
 
   <script type="module" src="app.js"></script>
 </body>

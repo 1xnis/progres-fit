@@ -53,6 +53,8 @@ API-ul REST generat automat: autentificarea și API-ul sunt scrise în `server.j
 
 ### Pornire
 
+Este nevoie de **Node.js 24** sau mai nou.
+
 ```bash
 npm install
 ```
@@ -202,9 +204,26 @@ erDiagram
 - **`CHECK` pe format**: emailul conține `@` și este scris cu litere mici (unicitatea nu poate fi ocolită prin majuscule).
 - **`DEFAULT`**: data înscrierii, data plății, statusul.
 
+### Trigger: capacitatea clasei
+
+O regulă care nu se poate scrie ca `CHECK`, pentru că depinde de alte rânduri: o clasă nu poate
+avea mai multe programări decât locuri. Funcția `verifica_capacitate()` rulează
+`BEFORE INSERT OR UPDATE` pe `programari`:
+
+1. programările cu status `anulat` trec fără verificare (nu ocupă loc);
+2. blochează rândul clasei cu `SELECT ... FOR UPDATE`, ca două programări simultane să nu ia
+   amândouă ultimul loc;
+3. numără programările neanulate ale clasei, fără cea curentă;
+4. dacă nu mai sunt locuri, oprește operația cu `RAISE EXCEPTION`, iar utilizatorul vede
+   mesajul „Clasa este plină".
+
+Triggerul rulează și la `UPDATE`, deci o programare anulată nu poate fi reactivată dacă între
+timp locul s-a ocupat.
+
 Validarea datelor este făcută de aceste constrângeri. Serverul traduce erorile PostgreSQL în
 răspunsuri HTTP: `23505` (unicitate) și `23503`/`23001` (cheie străină) devin `409`, iar
-`23514` (CHECK), `23502` (NOT NULL) și clasa `22` (format invalid) devin `400`.
+`23514` (CHECK), `23502` (NOT NULL) și clasa `22` (format invalid) devin `400`, iar `P0001`
+(excepția din trigger) devine `409`.
 
 Pe toate tabelele este activat **Row Level Security** fără nicio politică. Astfel API-ul REST
 public pe care Supabase îl generează automat nu poate citi nimic; aplicația se conectează ca
@@ -266,7 +285,8 @@ Cazuri speciale:
 - **`sesiuni`**: crearea se face doar prin autentificare (`POST /api/sesiuni` răspunde `405`).
   Adminul le poate lista, le poate modifica data de expirare și le poate șterge (revocare).
 
-Alte rute: `POST /api/login`, `POST /api/logout`, `GET /api/me`, `GET /api/rapoarte/:nume`.
+Alte rute: `POST /api/login`, `POST /api/logout`, `GET /api/me`, `GET /api/azi` (cifrele și
+clasele pentru pagina de start), `GET /api/rapoarte/:nume`.
 
 Protecție împotriva SQL injection: valorile ajung în interogări doar ca parametri (`$1`, `$2`…),
 iar numele de tabele și coloane provin exclusiv din descrierea de pe server, niciodată din cerere.
@@ -304,7 +324,9 @@ Alte măsuri:
 - mesajul de eroare este același pentru email inexistent și pentru parolă greșită;
 - schimbarea parolei unui utilizator îi șterge celelalte sesiuni;
 - ștergerea unui utilizator îi șterge sesiunile (`ON DELETE CASCADE`);
-- sesiunile expirate sunt curățate la fiecare autentificare.
+- sesiunile expirate sunt curățate la fiecare autentificare;
+- după 10 parole greșite la rând pe același cont, de la aceeași adresă IP, autentificarea este
+  blocată 15 minute (răspuns `429`). Contorul este ținut în memoria serverului.
 
 ## 7. Roluri
 
@@ -317,7 +339,7 @@ permis, dar decizia se ia întotdeauna pe server.
 | Membri | citire + scriere | citire + scriere | citire |
 | Abonamente | citire + scriere | citire + scriere | fără acces |
 | Plăți | citire + scriere | citire + scriere | fără acces |
-| Clase | citire + scriere | citire | citire + scriere |
+| Clase | citire + scriere | citire | citire + scriere doar la clasele proprii |
 | Programări | citire + scriere | citire + scriere | citire + scriere |
 | Antrenori | citire + scriere | citire | citire |
 | Tipuri de abonament | citire + scriere | citire | citire |
@@ -331,33 +353,55 @@ Pe scurt: **adminul** configurează sala și vede banii, **recepționerul** lucr
 abonamentele și încasările, iar **antrenorul** își gestionează clasele și prezența, fără acces
 la date financiare.
 
+Antrenorul poate modifica și șterge doar clasele la care este el antrenor (legătura se face prin
+`antrenori.utilizator_id`). O clasă creată de el îi este atribuită automat, indiferent ce antrenor
+trimite în cerere. Pentru clasa altcuiva primește `403`.
+
 ## 8. Paginile interfeței
 
 Interfața este o singură pagină (`public/index.html`) care își schimbă conținutul. Meniul
-afișează doar secțiunile permise rolului autentificat.
+afișează doar secțiunile permise rolului autentificat. Culorile sunt cele ale discurilor de
+haltere (albastru, galben, roșu, verde), pe un fond gri-ardezie.
 
 ### Autentificare
 
 Formular cu email și parolă. La date greșite afișează mesajul de eroare sub câmpuri. Apare
 automat și atunci când sesiunea a expirat.
 
-### Bara de sus
+### Meniul din stânga
 
-Prezentă pe toate paginile după autentificare: meniul cu secțiunile, numele și rolul
-utilizatorului și butonul **Ieșire**, care închide sesiunea.
+Prezent pe toate paginile după autentificare. Conține pagina **Azi**, secțiunile grupate în
+„Zi de zi" și „Administrare", **Rapoarte**, iar jos numele și rolul utilizatorului cu butonul
+**Ieși din cont**. Secțiunea curentă este marcată cu o bară galbenă. Pe telefon meniul trece
+în partea de sus și se derulează pe orizontală.
+
+### Azi (pagina de start)
+
+Prima pagină după autentificare:
+
+- un rând de cifre: membri înscriși, abonamente active, abonamente care expiră în 7 zile și
+  încasările lunii curente. Fiecare duce la secțiunea corespunzătoare. Antrenorul vede doar
+  numărul de membri;
+- **clasele de azi**, în ordinea orei: ora, denumirea, antrenorul și gradul de ocupare, desenat
+  ca un șir de pătrățele, câte unul pentru fiecare loc (albastru = rezervat, roșu = clasă plină).
+  Clasele care au trecut sunt estompate, iar la antrenor clasele lui sunt marcate cu „(tu)".
 
 ### Paginile de listă (câte una pentru fiecare entitate)
 
 Toate au aceeași structură:
 
-- titlul secțiunii și un câmp de **căutare**;
-- butonul **+ Adaugă** (doar dacă rolul are drept de scriere);
+- titlul secțiunii și un câmp de **căutare**, care filtrează pe măsură ce scrii;
+- butonul **Adaugă** (doar dacă rolul are drept de scriere);
 - tabelul cu înregistrările, câte 50 pe pagină, cele mai noi primele;
 - pentru fiecare rând, butoanele **Editează** și **Șterge** (doar cu drept de scriere);
-- butoanele **Înapoi** și **Înainte** pentru paginare.
+- butoanele **Pagina anterioară** și **Pagina următoare**.
 
-Ștergerea cere confirmare. Dacă baza de date o refuză (de exemplu un membru care are
-abonamente), mesajul constrângerii este afișat utilizatorului.
+Datele sunt afișate ca `zz.ll.aaaa`, sumele în lei, iar statusurile cu un punct colorat lângă
+cuvânt. La clase, antrenorul vede butoanele de editare și ștergere doar pe rândurile lui.
+
+Ștergerea cere confirmare. După o salvare sau o ștergere apare jos un mesaj scurt („Salvat.",
+„Șters."). Dacă baza de date refuză ștergerea (de exemplu un membru care are abonamente),
+mesajul apare în același loc, iar înregistrarea rămâne în listă.
 
 | Pagină | Ce afișează | Căutare după |
 |---|---|---|
@@ -379,13 +423,16 @@ Se deschide peste listă, cu câte un câmp pentru fiecare coloană:
 - coloanele cu valori fixe (status, rol, metodă de plată) sunt liste derulante;
 - cheile străine sunt câmpuri cu **căutare**: se scrie o parte din nume și se alege din
   sugestii (de exemplu membrul unui abonament);
+- câmpurile care pot rămâne goale sunt marcate „(opțional)" și primesc valoarea implicită din baza de date;
 - la utilizatori, parola este obligatorie la creare și opțională la editare.
 
 Erorile de validare venite din baza de date apar în fereastră, fără a pierde datele completate.
 
 ### Rapoarte
 
-Lista rapoartelor disponibile rolului curent. Fiecare se deschide ca PDF într-o filă nouă.
+Lista rapoartelor disponibile rolului curent, fiecare cu butonul **Deschide PDF**. Raportul se
+generează în acel moment și se deschide într-o filă nouă, de unde poate fi salvat sau tipărit.
+Nu se păstrează ca fișier pe server.
 
 ## 9. Indecși
 
@@ -395,11 +442,14 @@ aplicația le face efectiv:
 
 | Index | Interogarea deservită | Înainte | După |
 |---|---|---|---|
-| `idx_abonamente_membru` pe `abonamente(membru_id)` | abonamentele unui membru | Seq Scan, 1.765 ms | Bitmap Heap Scan, 0.065 ms |
-| `idx_abonamente_expirare` pe `abonamente(data_sfarsit) WHERE status = 'activ'` | raportul de expirări | Seq Scan, 3.874 ms | Bitmap Heap Scan, 0.571 ms |
-| `idx_plati_platit_la` pe `plati(platit_la)` | încasările dintr-o perioadă | Seq Scan, 3.366 ms | Bitmap Heap Scan, 0.223 ms |
-| `idx_plati_abonament` pe `plati(abonament_id)` | plățile unui abonament | Seq Scan, 1.906 ms | Index Scan, 0.043 ms |
-| `idx_programari_membru` pe `programari(membru_id)` | programările unui membru | Seq Scan, 0.680 ms | Index Scan, 0.029 ms |
+| `idx_abonamente_membru` pe `abonamente(membru_id)` | abonamentele unui membru | Seq Scan, 1.527 ms | Index Scan, 0.037 ms |
+| `idx_abonamente_expirare` pe `abonamente(data_sfarsit) WHERE status = 'activ'` | raportul de expirări | Seq Scan, 3.232 ms | Bitmap Heap Scan, 0.144 ms |
+| `idx_plati_platit_la` pe `plati(platit_la)` | încasările dintr-o perioadă | Seq Scan, 3.242 ms | Bitmap Heap Scan, 0.106 ms |
+| `idx_plati_abonament` pe `plati(abonament_id)` | plățile unui abonament | Seq Scan, 1.484 ms | Index Scan, 0.031 ms |
+| `idx_programari_membru` pe `programari(membru_id)` | programările unui membru | Index Scan pe `programari_unic`, 0.260 ms | Index Scan, 0.028 ms |
+
+Măsurătorile sunt făcute pe baza din Supabase (PostgreSQL 17). Timpii sunt cei de execuție
+raportați de server, deci nu includ rețeaua.
 
 Planurile complete (`EXPLAIN (ANALYZE, BUFFERS)`), înainte și după, sunt în
 [`docs/planuri-executie.md`](docs/planuri-executie.md). Se regenerează cu:
@@ -414,24 +464,28 @@ Exemplu, pentru abonamentele unui membru. Fără index, PostgreSQL citește toat
 rânduri (148 de pagini) și aruncă 19 996 dintre ele:
 
 ```
-Seq Scan on abonamente  (cost=0.00..398.00 rows=4 width=26) (actual time=0.127..1.747 rows=4.00 loops=1)
+Seq Scan on abonamente  (cost=0.00..398.00 rows=4 width=26) (actual time=0.107..1.505 rows=4 loops=1)
   Filter: (membru_id = 1234)
   Rows Removed by Filter: 19996
   Buffers: shared hit=148
-Execution Time: 1.765 ms
+Execution Time: 1.527 ms
 ```
 
-Cu index, citește doar 6 pagini, iar costul estimat scade de la 398 la 18:
+Cu index, citește doar 6 pagini, iar costul estimat scade de la 398 la 5,65:
 
 ```
-Bitmap Heap Scan on abonamente  (cost=4.32..18.40 rows=4 width=26) (actual time=0.036..0.043 rows=4.00 loops=1)
-  Recheck Cond: (membru_id = 1234)
+Index Scan using idx_abonamente_membru on abonamente  (cost=0.29..5.65 rows=4 width=26) (actual time=0.009..0.014 rows=4 loops=1)
+  Index Cond: (membru_id = 1234)
   Buffers: shared hit=6
-  ->  Bitmap Index Scan on idx_abonamente_membru  (cost=0.00..4.32 rows=4 width=0)
-Execution Time: 0.065 ms
+Execution Time: 0.037 ms
 ```
 
 Observații:
+
+- La `programari`, și fără indexul nostru planificatorul evită scanarea secvențială: parcurge
+  în întregime indexul constrângerii `UNIQUE (clasa_id, membru_id)`, unde `membru_id` este a
+  doua coloană (29 de pagini citite). Indexul dedicat reduce citirea la 3 pagini și costul
+  estimat de la 87 la 2,5.
 
 - `idx_abonamente_expirare` este un **index parțial**: conține doar abonamentele active,
   singurele care interesează raportul, deci este mai mic decât un index pe toată coloana.
@@ -453,7 +507,23 @@ npm run loadtest
 Implicit sunt 50 de conexiuni simultane, 10 secunde per scenariu. Alte valori:
 `npm run loadtest -- 100 20`. Rezultatele se scriu în [`docs/load-test.md`](docs/load-test.md).
 
-Rezultate măsurate la 2026-11-12, pe baza locală (PGlite), 50 de conexiuni, 10 secunde:
+Testul a fost rulat de două ori, cu același cod și aceleași date: 50 de conexiuni, 10 secunde
+per scenariu. Serverul Node rulează pe calculatorul local în ambele cazuri.
+
+### Pe Supabase (baza folosită de proiect)
+
+Baza de date este în regiunea `eu-north-1` (Stockholm). O interogare simplă (`SELECT 1`) durează
+în medie **52 ms** dus-întors de pe calculatorul de test.
+
+| Scenariu | Cerere | Cereri/s | p50 (ms) | p97.5 (ms) | p99 (ms) | max (ms) | Erori |
+|---|---|---|---|---|---|---|---|
+| Listă paginată | `GET /api/membri?limit=50` | 86 | 551 | 795 | 874 | 906 | 0 |
+| Căutare după nume (ILIKE) | `GET /api/membri?q=popescu&limit=50` | 81 | 588 | 785 | 851 | 902 | 0 |
+| Filtru pe coloană indexată | `GET /api/abonamente?membru_id=1234` | 87 | 552 | 755 | 840 | 884 | 0 |
+| Listă cu 2 etichete FK | `GET /api/abonamente?limit=50` | 85 | 554 | 791 | 852 | 905 | 0 |
+| Scriere (UPDATE) | `PUT /api/membri/1` | 86 | 555 | 704 | 795 | 879 | 0 |
+
+### Pe baza locală (PGlite), pentru comparație
 
 | Scenariu | Cerere | Cereri/s | p50 (ms) | p97.5 (ms) | p99 (ms) | max (ms) | Erori |
 |---|---|---|---|---|---|---|---|
@@ -463,20 +533,22 @@ Rezultate măsurate la 2026-11-12, pe baza locală (PGlite), 50 de conexiuni, 10
 | Listă cu 2 etichete FK | `GET /api/abonamente?limit=50` | 321 | 150 | 199 | 209 | 269 | 0 |
 | Scriere (UPDATE) | `PUT /api/membri/1` | 902 | 51 | 78 | 90 | 300 | 0 |
 
-Interpretare:
+### Interpretare
 
-- Nicio cerere nu a eșuat sub sarcină.
-- Fiecare cerere face două interogări: verificarea sesiunii și operația propriu-zisă.
-- Filtrarea pe coloana indexată este cel mai rapid scenariu de citire (584 cereri/s).
-- Căutarea cu `ILIKE` este de aproximativ 3,5 ori mai lentă, pentru că scanează tot tabelul
-  `membri`. Este limita explicată la capitolul Indecși.
-- Lista de abonamente este mai lentă decât cea de membri pentru că fiecare rând aduce două
-  etichete din alte tabele.
-
-**Atenție:** aceste cifre sunt de pe baza locală încorporată, care execută interogările pe rând,
-pe o singură conexiune. Pe Supabase rezultatele vor fi diferite: se adaugă latența de rețea până
-la serverul din cloud, dar interogările rulează în paralel pe un pool de 10 conexiuni. Testul
-trebuie rulat din nou după configurarea `DATABASE_URL`, iar tabelul de mai sus actualizat.
+- Nicio cerere nu a eșuat sub sarcină, în niciunul dintre teste.
+- **Pe Supabase limita este rețeaua, nu baza de date.** Toate scenariile dau aproximativ același
+  rezultat (81–87 cereri/s), indiferent cât de grea este interogarea. Explicația: fiecare cerere
+  face două interogări (verificarea sesiunii și operația propriu-zisă), fiecare durează circa
+  52 ms din cauza distanței, iar aplicația are un pool de 10 conexiuni. Rezultă un maxim teoretic
+  de 10 / (2 × 0,052 s) ≈ 96 cereri/s, foarte aproape de ce s-a măsurat.
+- Timpul de execuție din PostgreSQL este de sub 4 ms chiar și fără indecși (capitolul 9), deci
+  este neglijabil față de cei 52 ms de rețea.
+- Latența mare (p50 ≈ 550 ms) vine din așteptarea la coadă: 50 de clienți împart 10 conexiuni.
+- **Pe baza locală, fără rețea, se văd diferențele dintre interogări**: filtrarea pe coloana
+  indexată este cea mai rapidă citire, iar căutarea cu `ILIKE` este de aproximativ 3,5 ori mai
+  lentă, pentru că scanează tot tabelul `membri`.
+- Ce ar îmbunătăți rezultatul pe Supabase: rularea serverului în aceeași regiune cu baza de
+  date, un pool mai mare, sau unirea verificării sesiunii cu operația într-o singură interogare.
 
 ## 11. Rapoarte
 
@@ -502,6 +574,10 @@ Testele din `test/api.test.js` pornesc aplicația pe o bază PostgreSQL în memo
 - existența datelor de test după pornire;
 - CRUD complet pe membri și respectarea constrângerilor (unicitate, CHECK, NOT NULL, cheie străină);
 - drepturile diferite ale celor trei roluri;
+- triggerul de capacitate: clasa plină refuză programarea, anularea eliberează locul;
+- că antrenorul poate modifica doar clasele lui;
+- că pagina Azi nu trimite antrenorului date financiare;
+- blocarea autentificării după 10 parole greșite;
 - că hash-ul parolei nu apare în răspunsuri, că o parolă nouă funcționează și că sesiunea
   este invalidă după logout;
 - că cele trei rapoarte sunt PDF-uri valide.
@@ -510,10 +586,9 @@ Testele din `test/api.test.js` pornesc aplicația pe o bază PostgreSQL în memo
 
 - **Diacritice în PDF**: fontul standard din PDF nu conține `ș`, `ț`, `ă`, deci rapoartele sunt
   scrise fără diacritice. Rezolvarea este includerea unui font TTF.
-- **Capacitatea clasei** nu este impusă de baza de date: se pot face mai multe programări decât
-  locuri. Ar necesita un trigger.
-- **Antrenorul** poate modifica orice clasă, nu doar pe ale lui.
-- **Fără limitare a încercărilor de autentificare** (rate limiting).
+- **Limita de încercări la autentificare** este ținută în memorie: se resetează la repornirea
+  serverului și nu ar funcționa cu mai multe servere în paralel.
+- **Fonturile** interfeței se încarcă de la Google Fonts; fără internet se folosește fontul sistemului.
 - **Certificatul TLS** al bazei de date nu este verificat (conexiunea este criptată, dar
   identitatea serverului nu este confirmată). Pentru producție se configurează certificatul CA din Supabase.
 - **Căutarea după nume** nu folosește index (vezi capitolele 9 și 10).

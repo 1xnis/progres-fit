@@ -45,7 +45,8 @@ test('fixtures: datele de test există după pornire', async () => {
 
 test('recepționer: CRUD complet pe membri + constrângeri', async () => {
   const rec = cerere((await login('receptie@progresfit.ro')).cookie);
-  const nou = { nume: 'Test', prenume: 'Membru', email: 'Test.Membru@Example.com' };
+  // campurile goale vin asa din formular si trebuie sa ia valoarea implicita
+  const nou = { nume: 'Test', prenume: 'Membru', email: 'Test.Membru@Example.com', telefon: '', data_inscrierii: '' };
   const creat = await rec('membri', 'POST', nou);
   assert.equal(creat.status, 201);
   const { id } = creat.body;
@@ -58,6 +59,7 @@ test('recepționer: CRUD complet pe membri + constrângeri', async () => {
   assert.equal((await rec(`membri/${id}`, 'PUT', { telefon: '0700123456' })).status, 200);
   const citit = (await rec(`membri?id=${id}`)).body[0];
   assert.equal(citit.telefon, '0700123456');
+  assert.match(citit.data_inscrierii, /^\d{4}-\d\d-\d\d$/);
   assert.equal(citit.email, 'test.membru@example.com');
 
   // abonament cu perioadă inversată -> CHECK; membru cu abonament -> FK RESTRICT la ștergere
@@ -100,6 +102,56 @@ test('admin: utilizatori fără hash în răspuns, parolă nouă funcțională, 
   assert.equal((await admin('sesiuni', 'POST', { utilizator_id: 1 })).status, 405);
   assert.equal((await admin('logout', 'POST')).status, 204);
   assert.equal((await admin('membri')).status, 401, 'sesiunea e invalidă după logout');
+});
+
+test('triggerul nu lasă mai multe programări decât locuri', async () => {
+  const admin = cerere((await login('admin@progresfit.ro')).cookie);
+  const clasa = (await admin('clase', 'POST', { denumire: 'Mica', antrenor_id: 2, incepe_la: '2027-01-10T10:00:00Z', capacitate: 1 })).body.id;
+  const p1 = await admin('programari', 'POST', { clasa_id: clasa, membru_id: 1 });
+  assert.equal(p1.status, 201);
+  const plin = await admin('programari', 'POST', { clasa_id: clasa, membru_id: 2 });
+  assert.equal(plin.status, 409);
+  assert.match(plin.body.eroare, /plină/);
+  // o programare anulata elibereaza locul
+  assert.equal((await admin(`programari/${p1.body.id}`, 'PUT', { status: 'anulat' })).status, 200);
+  const p2 = await admin('programari', 'POST', { clasa_id: clasa, membru_id: 2 });
+  assert.equal(p2.status, 201);
+  assert.equal((await admin(`programari/${p1.body.id}`, 'PUT', { status: 'confirmat' })).status, 409, 'nu se poate reactiva peste capacitate');
+  assert.equal((await admin(`clase/${clasa}`, 'DELETE')).status, 204);
+});
+
+test('antrenorul modifică doar clasele lui', async () => {
+  const ant = cerere((await login('antrenor@progresfit.ro')).cookie);
+  // in fixtures clasa 1 e a antrenorului 1 (contul demo), clasa 2 e a altuia
+  assert.equal((await ant('clase/1', 'PUT', { capacitate: 30 })).status, 200);
+  assert.equal((await ant('clase/2', 'PUT', { capacitate: 30 })).status, 403);
+  assert.equal((await ant('clase/2', 'DELETE')).status, 403);
+  // chiar daca cere alt antrenor, clasa noua ramane pe el
+  const noua = await ant('clase', 'POST', { denumire: 'Test', antrenor_id: 3, incepe_la: '2027-01-10T10:00:00Z', capacitate: 10 });
+  assert.equal(noua.status, 201);
+  assert.equal((await ant(`clase?id=${noua.body.id}`)).body[0].antrenor_id, 1);
+  assert.equal((await ant(`clase/${noua.body.id}`, 'PUT', { antrenor_id: 3 })).status, 200);
+  assert.equal((await ant(`clase?id=${noua.body.id}`)).body[0].antrenor_id, 1);
+  assert.equal((await ant(`clase/${noua.body.id}`, 'DELETE')).status, 204);
+});
+
+test('pagina Azi: antrenorul nu vede banii', async () => {
+  const admin = cerere((await login('admin@progresfit.ro')).cookie);
+  const ant = cerere((await login('antrenor@progresfit.ro')).cookie);
+  const a = (await admin('azi')).body;
+  assert.equal(a.cifre.membri, 5000);
+  assert.ok('incasari_luna' in a.cifre);
+  assert.equal(a.clase.length, 4, 'fixtures pun 4 clase pe zi');
+  const b = (await ant('azi')).body;
+  assert.deepEqual(Object.keys(b.cifre), ['membri']);
+  assert.equal((await ant('me')).body.antrenor_id, 1);
+});
+
+test('contul se blochează după 10 parole greșite', async () => {
+  for (let i = 0; i < 10; i++) assert.equal((await login('blocat@progresfit.ro', 'gresita')).status, 401);
+  assert.equal((await login('blocat@progresfit.ro', 'gresita')).status, 429);
+  // celelalte conturi nu sunt afectate
+  assert.equal((await login('admin@progresfit.ro')).status, 200);
 });
 
 test('rapoartele sunt PDF-uri valide', async () => {
